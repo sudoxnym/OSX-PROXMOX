@@ -11,6 +11,7 @@ OpenCore Changelog
 - Add script in tools - CHECK-IOMMU.sh - Check if your IOMMU are ENABLED;
 - Update macrecovery tool for Opencore 0.7.7;
 - Update README;
+- Add option to remove macOS in Cloud bridge configuration;
 - Adjustments to copyright terms.
 
 #### v3.1.0

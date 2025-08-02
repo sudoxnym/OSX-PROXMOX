@@ -1219,6 +1219,94 @@ configure_network_bridge() {
   read -n 1 -s
 }
 
+# Function to remove network bridge
+remove_network_bridge() {
+  local logfile="${LOGDIR}/remove-network-bridge.log"
+
+  die() { display_and_log "ERROR: $*" "$logfile"; exit 1; }
+  warn() { display_and_log "WARNING: $*" "$logfile"; }
+  info() { display_and_log "INFO: $*" "$logfile"; }
+
+  regenerate_dhcpd_conf() {
+    printf "# DHCP Server Configuration\n# Global DHCP options\noption domain-name \"local\";\noption domain-name-servers 8.8.8.8, 8.8.4.4;\n\ndefault-lease-time 604800;\nmax-lease-time 1209600;\n\nauthoritative;\nlog-facility local7;\n" > /etc/dhcp/dhcpd.conf
+    printf "\n# Bridge configurations\n" >> /etc/dhcp/dhcpd.conf
+    for conf in "$DHCP_CONF_DIR"/*.conf; do
+      [[ -f "$conf" ]] && printf "include \"%s\";\n" "$conf" >> /etc/dhcp/dhcpd.conf
+    done
+  }
+
+  update_dhcp_interfaces() {
+    local interfaces=()
+    for conf in "$DHCP_CONF_DIR"/*.conf; do
+      [[ -f "$conf" ]] && interfaces+=("$(basename "${conf%.conf}")")
+    done
+    printf "INTERFACESv4=\"%s\"\n" "${interfaces[*]}" > /etc/default/isc-dhcp-server
+  }
+
+  (( EUID == 0 )) || die "This function must be run as root"
+
+  # Collect existing bridges excluding vmbr0
+  local bridges=()
+  while read -r line; do
+    if [[ $line =~ ^auto\ vmbr([0-9]+) ]]; then
+      b=${BASH_REMATCH[1]}
+      [[ $b -ne 0 ]] && bridges+=("$b")
+    fi
+  done < "$NETWORK_INTERFACES_FILE"
+
+  if (( ${#bridges[@]} == 0 )); then
+    info "No bridges available to remove"
+    display_and_log "Press any key to return to the main menu..."
+    read -n 1 -s
+    return
+  fi
+
+  echo "Existing bridges:"
+  for b in "${bridges[@]}"; do
+    echo " vmbr$b"
+  done
+
+  local bridge_num
+  read -rp "Enter bridge number to remove: " bridge_num
+  if ! [[ " ${bridges[*]} " =~ " $bridge_num " ]]; then
+    warn "Invalid bridge number"
+    display_and_log "Press any key to return to the main menu..."
+    read -n 1 -s
+    return
+  fi
+
+  info "Removing bridge vmbr$bridge_num..."
+
+  if ip link show "vmbr$bridge_num" &>/dev/null; then
+    ifdown --force "vmbr$bridge_num" >>"$logfile" 2>&1 || warn "Failed to bring down vmbr$bridge_num"
+    ip link delete "vmbr$bridge_num" >>"$logfile" 2>&1 || warn "Failed to delete vmbr$bridge_num"
+  fi
+
+  local start end total_lines
+  start=$(grep -n "^auto vmbr$bridge_num" "$NETWORK_INTERFACES_FILE" | head -n1 | cut -d: -f1)
+  if [[ -n "$start" ]]; then
+    end=$(tail -n +$((start+1)) "$NETWORK_INTERFACES_FILE" | grep -n '^auto ' | head -n1 | cut -d: -f1)
+    if [[ -n "$end" ]]; then
+      end=$((start+end-1))
+    else
+      total_lines=$(wc -l "$NETWORK_INTERFACES_FILE" | awk '{print $1}')
+      end=$total_lines
+    fi
+    sed -i "${start},${end}d" "$NETWORK_INTERFACES_FILE" || die "Failed to update network interfaces file"
+  fi
+
+  local conf_file="$DHCP_CONF_DIR/vmbr$bridge_num.conf"
+  [[ -f "$conf_file" ]] && rm -f "$conf_file"
+
+  regenerate_dhcpd_conf
+  update_dhcp_interfaces
+  systemctl restart isc-dhcp-server >>"$logfile" 2>&1 || warn "Failed to restart isc-dhcp-server"
+
+  info "Bridge vmbr$bridge_num removed"
+  display_and_log "Press any key to return to the main menu..."
+  read -n 1 -s
+}
+
 # Function to configure macOS VM
 configure_macos_vm() {
   local macopt=$1
@@ -1424,6 +1512,7 @@ main_menu() {
     echo " 203 - Remove Proxmox subscription notice"
     echo " 204 - Add new bridge (macOS in cloud)"
     echo " 205 - Customize OpenCore config.plist"
+    echo " 206 - Remove bridge (macOS in cloud)"
     echo
     echo " 0 - Quit (or ENTER)"
     echo
@@ -1440,6 +1529,7 @@ main_menu() {
         203) remove_subscription_notice ;;
         204) configure_network_bridge ;;
         205) customize_opencore_config ;;
+        206) remove_network_bridge ;;
         *) echo "Invalid option"; read -n 1 -s ;;
       esac
     fi
